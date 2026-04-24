@@ -101,9 +101,9 @@ const ITEM_CONFIG = {
     accent: "zinc",
   },
   scrap: {
-    label: "고철",
-    desc: "교환과 기술 이벤트에 사용된다",
-    shortDesc: "교환 재료",
+    label: "기타",
+    desc: "특수 장비와 지도, 재료가 모여 있습니다",
+    shortDesc: "특수 소지품",
     icon: Shield,
     accent: "slate",
   },
@@ -131,9 +131,13 @@ const ITEM_DETAILS = {
     { id: "shotgun_shell", name: "산탄", desc: "가까운 거리에서 위협적이다." },
   ],
   scrap: [
-    { id: "copper_wire", name: "구리선", desc: "배터리나 라디오 수리에 쓸 만하다." },
-    { id: "steel_plate", name: "철판 조각", desc: "무겁지만 어디든 써먹을 수 있다." },
-    { id: "bearing", name: "베어링", desc: "기계 부품 속에 숨어 있던 작은 보물이다." },
+    { id: "copper_wire", name: "구리선", desc: "배터리나 라디오 수리에 쓸 만하다.", isResource: true },
+    { id: "steel_plate", name: "철판 조각", desc: "무겁지만 어디든 써먹을 수 있다.", isResource: true },
+    { id: "bearing", name: "베어링", desc: "기계 부품 속에 숨어 있던 작은 보물이다.", isResource: true },
+    { id: "route_map", name: "노선 지도", desc: "도시 외곽 우회로와 폐쇄 구역이 표시된 낡은 지도다.", isResource: false },
+    { id: "pistol", name: "권총", desc: "권총 탄약을 사용할 수 있게 해 준다.", isResource: false },
+    { id: "rifle", name: "소총", desc: "소총 탄약을 사용할 수 있게 해 준다.", isResource: false },
+    { id: "shotgun", name: "샷건", desc: "산탄을 사용할 수 있게 해 준다.", isResource: false },
   ],
 };
 
@@ -163,15 +167,24 @@ function getItemUsageDescription(itemMeta) {
   if (itemMeta.category === "water") return "갈증을 가라앉힙니다.";
   if (itemMeta.id === "bandage") return "상처를 처치해 체력을 회복합니다.";
   if (itemMeta.category === "meds") return "상처를 처치하고 체력을 회복합니다.";
-  if (itemMeta.category === "ammo") return "전투 중 사격 시 자동으로 소모됩니다. 직접 사용하실 수는 없습니다.";
-  if (itemMeta.category === "scrap") return "교환, 제작, 기술 이벤트에 쓰이는 재료입니다. 직접 사용하실 수는 없습니다.";
+  if (itemMeta.id === "route_map") return "선택하시면 노선 지도를 해독하는 특수 상황이 등장합니다.";
+  if (itemMeta.id === "pistol") return "권총 탄약을 사용할 수 있게 해 주는 장비입니다.";
+  if (itemMeta.id === "rifle") return "소총 탄약을 사용할 수 있게 해 주는 장비입니다.";
+  if (itemMeta.id === "shotgun") return "산탄을 사용할 수 있게 해 주는 장비입니다.";
+  if (itemMeta.id === "pistol_round") return "권총을 소지한 경우에만 전투 중 자동으로 사용됩니다.";
+  if (itemMeta.id === "rifle_round") return "소총을 소지한 경우에만 전투 중 자동으로 사용됩니다.";
+  if (itemMeta.id === "shotgun_shell") return "샷건을 소지한 경우에만 전투 중 자동으로 사용됩니다.";
+  if (itemMeta.category === "scrap") return itemMeta.isResource === false ? "직접 사용하실 수 없는 특수 소지품입니다." : "교환, 제작, 기술 이벤트에 쓰이는 재료입니다. 직접 사용하실 수는 없습니다.";
   return "";
 }
 
 
 function getCategoryTotalFromInventory(run, category) {
   if (!run?.inventory) return 0;
-  return ITEM_DETAILS[category].reduce((sum, item) => sum + (run.inventory[item.id] || 0), 0);
+  return ITEM_DETAILS[category].reduce((sum, item) => {
+    if (item.isResource === false) return sum;
+    return sum + (run.inventory[item.id] || 0);
+  }, 0);
 }
 
 function syncResourceCounts(run) {
@@ -230,14 +243,16 @@ function applyResourceDeltaToInventory(before, run) {
     const beforeValue = before[category] || 0;
     const afterValue = run[category] || 0;
     const delta = afterValue - beforeValue;
+    const preferredId = run._inventoryHints?.[category];
 
     if (delta > 0) {
-      gained.push(...addInventoryItems(run, category, delta));
+      gained.push(...addInventoryItems(run, category, delta, preferredId || null));
     } else if (delta < 0) {
-      lost.push(...removeInventoryItems(run, category, Math.abs(delta)));
+      lost.push(...removeInventoryItems(run, category, Math.abs(delta), preferredId || null));
     }
   });
 
+  delete run._inventoryHints;
   syncResourceCounts(run);
   return { gained, lost };
 }
@@ -258,6 +273,34 @@ function createStartingInventory(base) {
     addInventoryItems(run, category, count);
   });
   return run.inventory;
+}
+
+function getStartingWeaponId(classId) {
+  if (classId === "soldier") return "rifle";
+  if (classId === "drone") return "pistol";
+  if (classId === "mechanic") return "pistol";
+  if (classId === "paramedic") return "pistol";
+  return "pistol";
+}
+
+function hasInventoryItem(run, itemId) {
+  return (run?.inventory?.[itemId] || 0) > 0;
+}
+
+function getAvailableShootOption(run) {
+  const options = [
+    { weaponId: "rifle", ammoId: "rifle_round", label: "소총", damage: [11, 16] },
+    { weaponId: "shotgun", ammoId: "shotgun_shell", label: "샷건", damage: [10, 18] },
+    { weaponId: "pistol", ammoId: "pistol_round", label: "권총", damage: [8, 13] },
+  ];
+  return options.find((option) => hasInventoryItem(run, option.weaponId) && (run?.inventory?.[option.ammoId] || 0) > 0) || null;
+}
+
+function getChoiceDisabledReason(choice, run) {
+  if (!choice?.disabled) return "";
+  const result = choice.disabled(run);
+  if (typeof result === "string") return result;
+  return result ? "조건이 부족합니다." : "";
 }
 
 function cloneChoice(choice) {
@@ -479,6 +522,49 @@ function makeFinalEvent(run) {
 
 function generateEvent(run) {
   if (run.distance >= 500) return makeFinalEvent(run);
+  if (run.flags.routeMapReady) {
+    run.flags.routeMapReady = false;
+    return {
+      id: uid(),
+      title: "노선 지도 판독",
+      text: "찢겨진 노선 지도를 펴자, 검은 펜으로 덧그린 우회로와 금지 구역 표식이 모습을 드러낸다. 어느 길을 잡느냐에 따라 서울의 다른 얼굴과 마주하게 된다.",
+      choices: [
+        {
+          label: "서부 폐고가 쪽으로 우회한다",
+          effect: (r, messages, perkOfferRef) => {
+            r.distance += 26;
+            modMorale(r, 3, messages, "길을 찾음");
+            gainExp(r, 10, messages, perkOfferRef);
+            messages.push("지도 덕분에 비교적 안전한 우회로를 골라 크게 전진했다.");
+          },
+        },
+        {
+          label: "남쪽 강변 정착지 표식을 따라간다",
+          effect: (r, messages, perkOfferRef) => {
+            r.distance += 14;
+            r.food += 1;
+            r.water += 1;
+            gainExp(r, 9, messages, perkOfferRef);
+            messages.push("버려진 선착장 근처 보급 은닉처를 찾아냈다.");
+          },
+        },
+        {
+          label: "봉쇄된 철도 노선을 뚫고 직진한다",
+          effect: (r, messages, perkOfferRef) => {
+            r.distance += 22;
+            if (chance(0.45)) {
+              const foe = enemyTemplate(r);
+              foe.name = "봉쇄선 잠복조";
+              r.pendingBattle = { enemy: foe, intro: "지도를 따라가던 길목에서 무장한 잠복조와 마주쳤다." };
+            } else {
+              modMorale(r, 2, messages, "대담한 진군");
+            }
+            gainExp(r, 11, messages, perkOfferRef);
+          },
+        },
+      ],
+    };
+  }
   if (run.day === 1 && !run.flags.introDone) {
     return {
       id: uid(),
@@ -587,7 +673,7 @@ function generateEvent(run) {
       choices: [
         {
           label: "응급처치를 해 준다",
-          disabled: (r) => r.meds <= 0,
+          disabled: (r) => (r.meds <= 0 ? "의약품이 부족합니다." : ""),
           effect: (r, messages, perkOfferRef) => {
             r.meds -= 1;
             if (chance(0.7)) {
@@ -605,7 +691,7 @@ function generateEvent(run) {
         },
         {
           label: "멀리서 식량만 던져 준다",
-          disabled: (r) => r.food <= 0,
+          disabled: (r) => (r.food <= 0 ? "식량이 부족합니다." : ""),
           effect: (r, messages, perkOfferRef) => {
             r.food -= 1;
             modMorale(r, 3, messages, "죄책감 완화");
@@ -688,7 +774,7 @@ function generateEvent(run) {
       choices: [
         {
           label: "고철 2개로 물 2병을 교환한다",
-          disabled: (r) => r.scrap < 2,
+          disabled: (r) => (r.scrap < 2 ? "기타 재료가 2개 필요합니다." : ""),
           effect: (r, messages, perkOfferRef) => {
             r.scrap -= 2;
             r.water += 2;
@@ -699,7 +785,7 @@ function generateEvent(run) {
         },
         {
           label: "탄약 2발로 구급약을 산다",
-          disabled: (r) => r.ammo < 2,
+          disabled: (r) => (r.ammo < 2 ? "탄약이 2발 이상 필요합니다." : ""),
           effect: (r, messages, perkOfferRef) => {
             r.ammo -= 2;
             r.meds += 1;
@@ -823,7 +909,7 @@ function generateEvent(run) {
         },
         {
           label: "안테나를 고쳐 신호를 잡아 본다",
-          disabled: (r) => r.scrap < 2,
+          disabled: (r) => (r.scrap < 2 ? "기타 재료가 2개 필요합니다." : ""),
           effect: (r, messages, perkOfferRef) => {
             r.scrap -= 2;
             modMorale(r, 6, messages, "집결지 좌표 확보");
@@ -970,7 +1056,7 @@ function generateEvent(run) {
       choices: [
         {
           label: "연료와 식량을 모아 부두에 정착한다",
-          disabled: (r) => r.food < 2 || r.water < 2,
+          disabled: (r) => (r.food < 2 || r.water < 2 ? `식량 ${Math.max(0, 2 - r.food)}개, 물 ${Math.max(0, 2 - r.water)}병이 더 필요합니다.` : ""),
           effect: (r, messages, perkOfferRef) => {
             const settleScore = r.food * 4 + r.water * 4 + r.meds * 2 + r.morale;
             if (settleScore >= 36) {
@@ -1018,11 +1104,43 @@ function generateEvent(run) {
     }
   );
 
+  events.push({
+    title: "버스 노선 안내판",
+    text: "부서진 정류장 안내판 뒤에 누군가 접어 숨겨 둔 도시 노선 지도가 끼워져 있다. 군데군데 피가 말라붙어 있다.",
+    choices: [
+      {
+        label: "지도를 챙긴다",
+        effect: (r, messages, perkOfferRef) => {
+          if (!hasInventoryItem(r, "route_map")) {
+            addInventoryItems(r, "scrap", 1, "route_map");
+            messages.push("노선 지도를 챙겼다. 이제 아이템 칸에서 지도를 선택해 새로운 길을 찾을 수 있다.");
+          } else {
+            messages.push("이미 같은 지도를 갖고 있어 더 챙길 필요는 없었다.");
+          }
+          r.distance += 4;
+          gainExp(r, 7, messages, perkOfferRef);
+        },
+      },
+      {
+        label: "주변만 뒤지고 떠난다",
+        effect: (r, messages, perkOfferRef) => {
+          r.scrap += 1;
+          r.distance += 5;
+          gainExp(r, 5, messages, perkOfferRef);
+          messages.push("안내판 프레임에서 쓸 만한 부품만 떼어 챙겼다.");
+        },
+      },
+    ],
+  });
+
   return cloneEvent(pick(events));
 }
 
 function createRun(selectedClass) {
-  return {
+  const inventory = createStartingInventory(selectedClass.base);
+  const startingWeapon = getStartingWeaponId(selectedClass.id);
+  inventory[startingWeapon] = 1;
+  const run = {
     classId: selectedClass.id,
     className: selectedClass.name,
     maxHp: selectedClass.base.maxHp,
@@ -1036,7 +1154,7 @@ function createRun(selectedClass) {
     ammo: selectedClass.base.ammo,
     scrap: selectedClass.base.scrap,
     weapon: selectedClass.base.weapon,
-    inventory: createStartingInventory(selectedClass.base),
+    inventory,
     exp: 0,
     level: 1,
     nextLevelExp: 24,
@@ -1044,15 +1162,18 @@ function createRun(selectedClass) {
     day: 1,
     distance: 0,
     perks: [...selectedClass.perks],
-    flags: { introDone: false, won: false, endingType: null, killCount: 0, battleWins: 0 },
+    flags: { introDone: false, won: false, endingType: null, killCount: 0, battleWins: 0, routeMapReady: false },
     pendingBattle: null,
   };
+  syncResourceCounts(run);
+  return run;
 }
 
 function BattlePanel({ battle, onAction, run }) {
+  const shootOption = getAvailableShootOption(run);
   const actions = [
     { id: "melee", label: "근접 공격", tip: "탄약 없이도 가능" },
-    { id: "shoot", label: "사격", tip: run.ammo > 0 ? `탄약 -1` : "탄약 부족" },
+    { id: "shoot", label: "사격", tip: shootOption ? `${shootOption.label} 사용` : "사용 가능한 총기·탄약 없음" },
     { id: "guard", label: "방어", tip: "받는 피해 감소" },
     { id: "escape", label: "도주", tip: "성공 시 전투 종료" },
   ];
@@ -1185,27 +1306,16 @@ function determineEnding(nextRun, won, extraLines = []) {
     };
   }
 
-  const type = nextRun.flags?.endingType || (nextRun.flags?.killCount >= 14 ? "massacre" : "survival");
+  const rawType = nextRun.flags?.endingType || (nextRun.flags?.killCount >= 14 ? "massacre" : "survival");
+  const type = rawType === "survival" ? "survival" : "impossible";
   const endingMap = {
     survival: {
       title: "생존 엔딩",
       summary: "너는 끝내 회색 도시의 경계를 넘어 살아남았다.",
     },
-    massacre: {
-      title: "학살 엔딩",
-      summary: "네가 남긴 것은 탈출이 아니라 도살의 흔적이었다. 서울은 피로 길을 열어 주었다.",
-    },
-    suicide: {
-      title: "탈출 성공?",
-      summary: "몸은 도시 밖으로 나가지 못했지만, 너는 누구보다 빨리 서울에서 벗어났다.",
-    },
-    settlement: {
-      title: "정착 엔딩",
-      summary: "더 먼 탈출 대신, 너는 서울 밖 어딘가에서 살아남는 법을 택했다.",
-    },
-    king: {
-      title: "왕 엔딩",
-      summary: "도시를 벗어나는 대신, 너는 회색 도시의 주인이 되었다.",
+    impossible: {
+      title: "탈출 불가능",
+      summary: "수많은 길을 택했지만, 서울은 탈출을 허락하지 않았다.",
     },
   };
 
@@ -1283,7 +1393,7 @@ export default function SeoulRogueSelectionGame() {
     setChoiceHistory((prev) => [
       { id: uid(), day: dayValue, eventTitle, label },
       ...prev,
-    ].slice(0, 14));
+    ].slice(0, 3));
   }
 
   function startGame(classId = selectedClassId) {
@@ -1342,7 +1452,6 @@ export default function SeoulRogueSelectionGame() {
 
     const next = copy(run);
     const messages = [];
-    const perkOfferRef = { current: null };
 
     if ((next.inventory?.[itemId] || 0) <= 0) return;
 
@@ -1351,16 +1460,20 @@ export default function SeoulRogueSelectionGame() {
       modHunger(next, 24);
       modMorale(next, 2, messages, "배를 채움");
       messages.unshift(`${meta.name} 사용`);
-    }
-    if (meta.category === "water") {
+    } else if (meta.category === "water") {
       removeInventoryItems(next, "water", 1, itemId);
       modThirst(next, 28);
       messages.unshift(`${meta.name} 사용`);
-    }
-    if (meta.category === "meds") {
+    } else if (meta.category === "meds") {
       removeInventoryItems(next, "meds", 1, itemId);
       heal(next, 14, messages, "치료");
       messages.unshift(`${meta.name} 사용`);
+    } else if (meta.id === "route_map") {
+      next.flags.routeMapReady = true;
+      messages.unshift("노선 지도 확인");
+      messages.push("노선 지도를 펼쳤다. 다음 상황에서 다른 경로를 고를 수 있다.");
+    } else {
+      return;
     }
 
     setRun(next);
@@ -1373,6 +1486,9 @@ export default function SeoulRogueSelectionGame() {
     const meta = getItemMeta(target);
     setItemDialog(null);
     if (meta && ["food", "water", "meds"].includes(meta.category)) {
+      consumeItem(target);
+    }
+    if (meta?.id === "route_map") {
       consumeItem(target);
     }
   }
@@ -1485,13 +1601,15 @@ export default function SeoulRogueSelectionGame() {
     }
 
     if (action === "shoot") {
-      if (nextRun.ammo <= 0) {
-        messages.push("탄약이 없어 제대로 쏘지 못했다.");
+      const shootOption = getAvailableShootOption(nextRun);
+      if (!shootOption) {
+        messages.push("사용 가능한 총기와 해당 탄약이 없어 제대로 쏘지 못했다.");
       } else {
         nextRun.ammo -= 1;
-        const damage = rand(8, 13) + nextRun.weapon * 2 + (hasPerk(nextRun, "marksman") ? 5 : 0) + nextRun.level;
+        nextRun._inventoryHints = { ...(nextRun._inventoryHints || {}), ammo: shootOption.ammoId };
+        const damage = rand(shootOption.damage[0], shootOption.damage[1]) + nextRun.weapon * 2 + (hasPerk(nextRun, "marksman") ? 5 : 0) + nextRun.level;
         enemy.hp -= damage;
-        messages.push(`사격으로 ${damage} 피해`);
+        messages.push(`${shootOption.label} 사격으로 ${damage} 피해`);
       }
     }
 
@@ -1607,7 +1725,7 @@ export default function SeoulRogueSelectionGame() {
   const itemDialogMeta = itemDialog ? getItemMeta(itemDialog.itemId) : null;
   const itemDialogCategoryMeta = itemDialog ? ITEM_CONFIG[itemDialog.category] : null;
   const currentItemCount = itemDialog && run ? run.inventory?.[itemDialog.itemId] || 0 : 0;
-  const visibleChoiceHistory = choiceHistory;
+  const visibleChoiceHistory = choiceHistory.slice(0, 3);
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#23272f_0%,#111318_45%,#09090b_100%)] text-zinc-100">
@@ -1778,7 +1896,8 @@ export default function SeoulRogueSelectionGame() {
                     <p className="mt-3 text-sm leading-7 text-zinc-300">{event.text}</p>
                     <div className="mt-5 space-y-3">
                       {event.choices.map((choice, idx) => {
-                        const disabled = choice.disabled?.(run);
+                        const disabledReason = getChoiceDisabledReason(choice, run);
+                        const disabled = Boolean(disabledReason);
                         return (
                           <button
                             key={`${choice.label}-${idx}`}
@@ -1789,7 +1908,7 @@ export default function SeoulRogueSelectionGame() {
                           >
                             <div>
                               <div className="font-semibold text-white">{choice.label}</div>
-                              {disabled && <div className="mt-1 text-xs text-zinc-400">조건 부족</div>}
+                              {disabled && <div className="mt-1 text-xs text-rose-300">{disabledReason}</div>}
                             </div>
                             <ChevronRight className="h-5 w-5 text-zinc-400" />
                           </button>
@@ -1834,7 +1953,7 @@ export default function SeoulRogueSelectionGame() {
                   <div className="grid grid-cols-2 gap-3">
                     {CATEGORY_ORDER.map((category) => {
                       const config = ITEM_CONFIG[category];
-                      const total = run[category];
+                      const total = category === "scrap" ? ITEM_DETAILS[category].reduce((sum, item) => sum + (run.inventory?.[item.id] || 0), 0) : run[category];
                       return (
                         <button
                           key={category}
@@ -1940,7 +2059,7 @@ export default function SeoulRogueSelectionGame() {
                   .filter((item) => (run.inventory?.[item.id] || 0) > 0)
                   .map((item) => {
                     const count = run.inventory?.[item.id] || 0;
-                    const canUse = ["food", "water", "meds"].includes(itemCategoryDialog);
+                    const canUse = ["food", "water", "meds"].includes(itemCategoryDialog) || item.id === "route_map";
                     return (
                       <button
                         key={item.id}
@@ -1952,7 +2071,7 @@ export default function SeoulRogueSelectionGame() {
                           <div>
                             <div className="font-semibold text-white">{item.name}</div>
                             <div className="mt-1 text-sm leading-6 text-zinc-300">{item.desc}</div>
-                            <div className="mt-2 text-xs text-zinc-500">{canUse ? "눌러 상세 정보와 사용 여부를 확인하실 수 있습니다." : "직접 사용은 불가능하며 이벤트에서 자동으로 소모됩니다."}</div>
+                            <div className="mt-2 text-xs text-zinc-500">{canUse ? "눌러 상세 정보와 사용 여부를 확인하실 수 있습니다." : itemCategoryDialog === "ammo" ? "해당 총기를 소지했을 때 전투에서 자동으로 사용됩니다." : "직접 사용은 불가능하며 이벤트에서 자동으로 소모됩니다."}</div>
                           </div>
                           <div className="text-right">
                             <div className="text-lg font-black text-white">{count}</div>
@@ -2009,7 +2128,7 @@ export default function SeoulRogueSelectionGame() {
               <button
                 type="button"
                 onClick={confirmUseItem}
-                disabled={!["food", "water", "meds"].includes(itemDialog.category)}
+                disabled={!(["food", "water", "meds"].includes(itemDialog.category) || itemDialog.itemId === "route_map")}
                 className="rounded-3xl bg-white px-4 py-3 font-semibold text-black transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-35"
               >
                 사용
@@ -2065,7 +2184,7 @@ export default function SeoulRogueSelectionGame() {
                   className="w-full rounded-3xl border border-white/10 bg-white/5 p-4 text-left transition hover:bg-white/10"
                 >
                   <div className="font-semibold text-white">{perk.name}</div>
-                  <div className="mt-2 text-[11px] uppercase tracking-[0.22em] text-zinc-500">능력</div>
+                  <div className="mt-2 text-[11px] text-zinc-500">능력</div>
                   <div className="mt-1 text-sm leading-6 text-zinc-300">{perk.desc}</div>
                 </button>
               ))}
