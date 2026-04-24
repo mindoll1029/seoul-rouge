@@ -13,6 +13,9 @@ const PERKS = [
   { id: "marksman", name: "사수", desc: "사격 피해 증가" },
   { id: "medic", name: "응급처치", desc: "의약품 회복량 증가" },
   { id: "runner", name: "도주본능", desc: "도주 성공률 증가" },
+  { id: "nimble", name: "날렵함", desc: "뛰어넘기·회피 계열 상황의 위험을 줄인다" },
+  { id: "strong", name: "근력", desc: "무거운 장비를 다루거나 들어 올리는 상황에 유리하다" },
+  { id: "tough", name: "강인함", desc: "골절과 큰 부상 확률이 낮아진다" },
   { id: "ironwill", name: "강한 멘탈", desc: "멘탈 하락 완화" },
   { id: "tactician", name: "전술 감각", desc: "방어와 전투 안정성 증가" },
   { id: "stomach", name: "버티는 위장", desc: "허기 감소 속도 완화" },
@@ -198,7 +201,8 @@ function pickDetailItem(category, biasId) {
   if (biasId && pool.some((item) => item.id === biasId)) {
     return pool.find((item) => item.id === biasId);
   }
-  return copy(pick(pool));
+  const filteredPool = category === "scrap" ? pool.filter((item) => item.isResource !== false) : pool;
+  return copy(pick(filteredPool.length > 0 ? filteredPool : pool));
 }
 
 function addInventoryItems(run, category, count = 1, biasId = null) {
@@ -303,11 +307,89 @@ function getChoiceDisabledReason(choice, run) {
   return result ? "조건이 부족합니다." : "";
 }
 
+function ensureStatuses(run) {
+  if (!run.statuses) {
+    run.statuses = {
+      head: [],
+      arm: [],
+      leg: [],
+      body: [],
+      bleedDistance: 0,
+      bodyInjuryDistance: 0,
+      parasiteStacks: 0,
+    };
+  }
+  return run.statuses;
+}
+
+function getPerkLevel(run, perkId) {
+  return run?.perks?.filter((id) => id === perkId).length || 0;
+}
+
+function hasStatus(run, statusId, part = null) {
+  const statuses = ensureStatuses(run);
+  if (part) return statuses[part]?.includes(statusId) || false;
+  return ["head", "arm", "leg", "body"].some((zone) => statuses[zone]?.includes(statusId));
+}
+
+function addStatus(run, part, statusId, messages = [], source = "") {
+  const statuses = ensureStatuses(run);
+  if (!statuses[part]) return;
+  if (!statuses[part].includes(statusId)) {
+    statuses[part].push(statusId);
+    if (statusId === "bleeding") statuses.bleedDistance = 0;
+    if (statusId === "body_injury") statuses.bodyInjuryDistance = 0;
+    const partLabel = { head: "머리", arm: "팔", leg: "다리", body: "몸" }[part] || part;
+    const statusLabel = {
+      bleeding: "출혈",
+      injury: "부상",
+      fracture: "부러짐",
+      body_injury: "몸 부상",
+      infection: "감염",
+    }[statusId] || statusId;
+    messages.push(`${source ? `${source}: ` : ""}${partLabel} ${statusLabel}`);
+  }
+}
+
+function removeStatus(run, statusId, part = null, messages = []) {
+  const statuses = ensureStatuses(run);
+  const zones = part ? [part] : ["head", "arm", "leg", "body"];
+  zones.forEach((zone) => {
+    statuses[zone] = (statuses[zone] || []).filter((value) => value !== statusId);
+  });
+  if (statusId === "bleeding") statuses.bleedDistance = 0;
+  if (statusId === "body_injury") statuses.bodyInjuryDistance = 0;
+  if (messages.length >= 0) {
+    const label = {
+      bleeding: "출혈",
+      infection: "감염",
+      fracture: "부러짐",
+      injury: "부상",
+      body_injury: "몸 부상",
+    }[statusId] || statusId;
+    messages.push(`${label} 상태가 정리되었다.`);
+  }
+}
+
+function getStatusDisabledReason(choice, run) {
+  if (!run) return "";
+  const tags = choice?.tags || [];
+  if (tags.includes("observation") && (hasStatus(run, "injury", "head") || hasStatus(run, "fracture", "head"))) return "머리 부상으로 관찰 행동이 불가능합니다.";
+  if (tags.includes("handUse") && (hasStatus(run, "injury", "arm") || hasStatus(run, "fracture", "arm"))) return "팔 부상으로 손을 써야 하는 행동이 불가능합니다.";
+  if ((tags.includes("jump") || tags.includes("run")) && (hasStatus(run, "injury", "leg") || hasStatus(run, "fracture", "leg"))) return "다리 부상으로 뛰거나 뛰어넘을 수 없습니다.";
+  return "";
+}
+
+function getChoiceUnavailableReason(choice, run) {
+  return getChoiceDisabledReason(choice, run) || getStatusDisabledReason(choice, run);
+}
+
 function cloneChoice(choice) {
   return {
     ...choice,
     disabled: choice.disabled,
     effect: choice.effect,
+    tags: choice.tags || [],
   };
 }
 
@@ -338,12 +420,13 @@ function hasPerk(run, perkId) {
 }
 
 function availablePerks(run) {
-  return PERKS.filter((p) => !run.perks.includes(p.id) && p.id !== "quickstudy");
+  return PERKS.filter((p) => p.id !== "quickstudy");
 }
 
 function gainExp(run, amount, messages, setPerkOffer) {
   const boost = run.classId === "student" || hasPerk(run, "quickstudy") ? 1.15 : 1;
-  const gained = Math.round(amount * boost);
+  const legPenalty = hasStatus(run, "injury", "leg") ? 0.5 : 1;
+  const gained = Math.max(1, Math.round(amount * boost * legPenalty));
   run.exp += gained;
   messages.push(`경험치 +${gained}`);
   while (run.exp >= run.nextLevelExp) {
@@ -392,10 +475,42 @@ function modThirst(run, amount) {
 function endTurn(run, messages, perkOfferRef) {
   run.day += 1;
   run.danger = clamp(run.danger + 0.2, 1, 10);
+  const statuses = ensureStatuses(run);
   const hungerLoss = hasPerk(run, "stomach") ? rand(4, 7) : rand(6, 9);
-  const thirstLoss = hasPerk(run, "waterwise") ? rand(5, 8) : rand(7, 11);
+  const parasiteFactor = 1 + (statuses.parasiteStacks || 0) * 0.05;
+  const thirstLossBase = hasPerk(run, "waterwise") ? rand(5, 8) : rand(7, 11);
+  const thirstLoss = Math.round(thirstLossBase * parasiteFactor);
   modHunger(run, -hungerLoss);
   modThirst(run, -thirstLoss);
+
+  if (hasStatus(run, "infection")) {
+    const hpLoss = Math.max(1, Math.ceil(run.hp * 0.01));
+    const hungerPenalty = Math.max(1, Math.ceil(run.hunger * 0.01));
+    const thirstPenalty = Math.max(1, Math.ceil(run.thirst * 0.01));
+    const moralePenalty = Math.max(1, Math.ceil(run.morale * 0.01));
+    run.hp = clamp(run.hp - hpLoss, 0, run.maxHp);
+    run.hunger = clamp(run.hunger - hungerPenalty, 0, 100);
+    run.thirst = clamp(run.thirst - thirstPenalty, 0, 100);
+    run.morale = clamp(run.morale - moralePenalty, 0, 100);
+    messages.push("감염 악화: 모든 능력치가 조금씩 무너진다.");
+  }
+
+  if (hasStatus(run, "bleeding")) {
+    statuses.bleedDistance += 1;
+    hurt(run, 3, messages, "출혈");
+    if (statuses.bleedDistance >= 10 && !hasStatus(run, "infection")) {
+      addStatus(run, "body", "infection", messages, "감염 전이");
+      removeStatus(run, "bleeding");
+    }
+  }
+
+  if (hasStatus(run, "body_injury")) {
+    statuses.bodyInjuryDistance += 1;
+    if (statuses.bodyInjuryDistance >= 20) {
+      run.hp = 0;
+      messages.push("몸 부상이 악화되어 더 이상 버티지 못했다.");
+    }
+  }
 
   if (run.hunger <= 0) {
     hurt(run, 8, messages, "굶주림");
@@ -565,11 +680,11 @@ function generateEvent(run) {
       ],
     };
   }
-  if (run.day === 1 && !run.flags.introDone) {
-    return {
-      id: uid(),
+
+  const events = [
+    {
       title: "무너진 지하철 출구",
-      text: "정전된 역사를 빠져나오자 차가운 회색 공기와 함께 도시의 적막이 덮쳐온다. 살아남으려면 북쪽 집결지까지 이동해야 한다.",
+      text: "정전된 역사를 빠져나오자 차가운 회색 공기와 함께 도시의 적막이 덮쳐온다. 살아남으려면 북쪽을 향해 계속 움직여야 한다.",
       choices: [
         {
           label: "주변 상가부터 수색한다",
@@ -585,6 +700,7 @@ function generateEvent(run) {
         },
         {
           label: "곧장 큰 도로로 이동한다",
+          tags: ["run"],
           effect: (r, messages, perkOfferRef) => {
             r.distance += 8;
             modMorale(r, 2, messages, "전진");
@@ -593,10 +709,7 @@ function generateEvent(run) {
           },
         },
       ],
-    };
-  }
-
-  const events = [
+    },
     {
       title: "편의점 잔해",
       text: "유리문이 깨진 편의점이다. 계산대 뒤에서 비닐이 바스락거린다.",
@@ -651,6 +764,7 @@ function generateEvent(run) {
             } else {
               const foe = enemyTemplate(r);
               messages.push("문이 열리자 숨어 있던 적이 튀어나왔다.");
+              if (chance(0.25)) addStatus(r, "head", "injury", messages, "문틀 충돌");
               r.pendingBattle = { enemy: foe, intro: "좁은 복도 전투가 시작된다." };
             }
             r.distance += 4;
@@ -745,6 +859,7 @@ function generateEvent(run) {
       choices: [
         {
           label: "차량 사이를 넘는다",
+          tags: ["jump"],
           effect: (r, messages, perkOfferRef) => {
             if (chance(0.45)) {
               const foe = enemyTemplate(r);
@@ -752,7 +867,10 @@ function generateEvent(run) {
               r.pendingBattle = { enemy: foe, intro: "차량 틈에서 무장한 적이 튀어나왔다." };
             } else {
               r.scrap += 2;
-              messages.push("부품을 뜯어 고철을 확보했다.");
+              messages.push("부품을 뜯어 기타 재료를 확보했다.");
+            }
+            if (!hasPerk(r, "nimble") && chance(0.7)) {
+              addStatus(r, "leg", "bleeding", messages, "차량 틈 파편");
             }
             r.distance += 6;
             gainExp(r, 9, messages, perkOfferRef);
@@ -760,8 +878,10 @@ function generateEvent(run) {
         },
         {
           label: "아래 도로로 우회한다",
+          tags: ["run"],
           effect: (r, messages, perkOfferRef) => {
             hurt(r, 4, messages, "무너진 난간");
+            if (chance(0.35)) addStatus(r, "body", "body_injury", messages, "난간 붕괴");
             r.distance += 5;
             gainExp(r, 7, messages, perkOfferRef);
           },
@@ -1005,10 +1125,12 @@ function generateEvent(run) {
       choices: [
         {
           label: "헤치고 건넌다",
+          tags: ["run"],
           effect: (r, messages, perkOfferRef) => {
             r.distance += 9;
             if (chance(0.5)) {
               hurt(r, 6, messages, "숨겨진 파편");
+              if (chance(0.45)) addStatus(r, "leg", "injury", messages, "침수 구간 미끄러짐");
             } else {
               r.scrap += 2;
               messages.push("물속에 잠긴 차량에서 쓸 만한 부품을 챙겼다.");
@@ -1032,16 +1154,22 @@ function generateEvent(run) {
       choices: [
         {
           label: "탄피와 장비를 수거한다",
+          tags: ["handUse"],
           effect: (r, messages, perkOfferRef) => {
-            r.ammo += rand(1, 3);
-            r.scrap += 1;
+            addInventoryItems(r, "scrap", 1, "pistol");
+            addInventoryItems(r, "ammo", 5, "pistol_round");
+            messages.push("권총 1정과 권총 탄약 5발을 챙겼다.");
+            if (!hasPerk(r, "strong") && !hasPerk(r, "tough")) {
+              if (chance(0.9)) addStatus(r, "arm", "fracture", messages, "무거운 장비 붕괴");
+              if (chance(0.5)) addStatus(r, "arm", "bleeding", messages, "날카로운 철편");
+            }
             r.distance += 5;
             gainExp(r, 8, messages, perkOfferRef);
-            messages.push("남겨진 장비를 회수했다.");
           },
         },
         {
           label: "망원경으로 외곽을 확인한다",
+          tags: ["observation"],
           effect: (r, messages, perkOfferRef) => {
             r.distance += 11;
             gainExp(r, 8, messages, perkOfferRef);
@@ -1136,6 +1264,47 @@ function generateEvent(run) {
   return cloneEvent(pick(events));
 }
 
+
+function applyDistanceStatusProgress(run, movedDistance, messages) {
+  if (!run || movedDistance <= 0) return;
+  const statuses = ensureStatuses(run);
+  if (hasStatus(run, "bleeding")) {
+    statuses.bleedDistance += movedDistance;
+    if (statuses.bleedDistance >= 10 && !hasStatus(run, "infection")) {
+      addStatus(run, "body", "infection", messages, "출혈 악화");
+      removeStatus(run, "bleeding");
+    }
+  }
+  if (hasStatus(run, "body_injury")) {
+    statuses.bodyInjuryDistance += movedDistance;
+    if (statuses.bodyInjuryDistance >= 20) {
+      run.hp = 0;
+      messages.push("몸 부상이 악화되어 더 이상 이동할 수 없었다.");
+    }
+  }
+  if (hasStatus(run, "infection")) {
+    const hpLoss = Math.max(1, Math.ceil(run.hp * 0.01));
+    const hungerPenalty = Math.max(1, Math.ceil(run.hunger * 0.01));
+    const thirstPenalty = Math.max(1, Math.ceil(run.thirst * 0.01));
+    const moralePenalty = Math.max(1, Math.ceil(run.morale * 0.01));
+    run.hp = clamp(run.hp - hpLoss, 0, run.maxHp);
+    run.hunger = clamp(run.hunger - hungerPenalty, 0, 100);
+    run.thirst = clamp(run.thirst - thirstPenalty, 0, 100);
+    run.morale = clamp(run.morale - moralePenalty, 0, 100);
+    messages.push("감염이 이동 중 퍼져 모든 능력치가 조금씩 약화되었다.");
+  }
+}
+
+function getStatusLabels(list = []) {
+  const map = {
+    bleeding: "출혈",
+    injury: "부상",
+    fracture: "부러짐",
+    body_injury: "몸 부상",
+    infection: "감염",
+  };
+  return list.map((item) => map[item] || item);
+}
 function createRun(selectedClass) {
   const inventory = createStartingInventory(selectedClass.base);
   const startingWeapon = getStartingWeaponId(selectedClass.id);
@@ -1163,6 +1332,15 @@ function createRun(selectedClass) {
     distance: 0,
     perks: [...selectedClass.perks],
     flags: { introDone: false, won: false, endingType: null, killCount: 0, battleWins: 0, routeMapReady: false },
+    statuses: {
+      head: [],
+      arm: [],
+      leg: [],
+      body: [],
+      bleedDistance: 0,
+      bodyInjuryDistance: 0,
+      parasiteStacks: 0,
+    },
     pendingBattle: null,
   };
   syncResourceCounts(run);
@@ -1171,11 +1349,13 @@ function createRun(selectedClass) {
 
 function BattlePanel({ battle, onAction, run }) {
   const shootOption = getAvailableShootOption(run);
+  const armInjured = hasStatus(run, "injury", "arm") || hasStatus(run, "fracture", "arm");
+  const legInjured = hasStatus(run, "injury", "leg") || hasStatus(run, "fracture", "leg");
   const actions = [
     { id: "melee", label: "근접 공격", tip: "탄약 없이도 가능" },
-    { id: "shoot", label: "사격", tip: shootOption ? `${shootOption.label} 사용` : "사용 가능한 총기·탄약 없음" },
+    { id: "shoot", label: "사격", tip: armInjured ? "팔 부상으로 사용 불가" : (shootOption ? `${shootOption.label} 사용` : "사용 가능한 총기·탄약 없음"), disabled: armInjured },
     { id: "guard", label: "방어", tip: "받는 피해 감소" },
-    { id: "escape", label: "도주", tip: "성공 시 전투 종료" },
+    { id: "escape", label: "도주", tip: legInjured ? "다리 부상으로 도주 불가" : "성공 시 전투 종료", disabled: legInjured },
   ];
 
   return (
@@ -1193,8 +1373,9 @@ function BattlePanel({ battle, onAction, run }) {
           {actions.map((action) => (
             <button
               key={action.id}
-              onClick={() => onAction(action.id)}
-              className="rounded-2xl border border-red-300/20 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10"
+              onClick={() => !action.disabled && onAction(action.id)}
+              disabled={action.disabled}
+              className="rounded-2xl border border-red-300/20 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <div className="font-medium text-white">{action.label}</div>
               <div className="mt-1 text-xs text-red-100/65">{action.tip}</div>
@@ -1306,23 +1487,19 @@ function determineEnding(nextRun, won, extraLines = []) {
     };
   }
 
-  const rawType = nextRun.flags?.endingType || (nextRun.flags?.killCount >= 14 ? "massacre" : "survival");
-  const type = rawType === "survival" ? "survival" : "impossible";
+  const type = nextRun.flags?.endingType || (nextRun.flags?.killCount >= 14 ? "massacre" : "survival");
   const endingMap = {
-    survival: {
-      title: "생존 엔딩",
-      summary: "너는 끝내 회색 도시의 경계를 넘어 살아남았다.",
-    },
-    impossible: {
-      title: "탈출 불가능",
-      summary: "수많은 길을 택했지만, 서울은 탈출을 허락하지 않았다.",
-    },
+    survival: { title: "생존 엔딩", summary: "너는 끝내 회색 도시의 경계를 넘어 살아남았다." },
+    massacre: { title: "학살 엔딩", summary: "살아남았지만, 네 뒤에는 피 냄새만 남았다." },
+    suicide: { title: "탈출 성공?", summary: "네가 벗어난 것은 서울이 아니라 고통이었을지도 모른다." },
+    settlement: { title: "정착 엔딩", summary: "도시 바깥 변두리에서, 너는 살아남는 쪽을 택했다." },
+    king: { title: "왕 엔딩", summary: "도시를 벗어나지 못한 대신, 도시 위에 군림했다." },
   };
 
   return {
     endingType: type,
-    title: endingMap[type]?.title || "생존 엔딩",
-    summary: endingMap[type]?.summary || "너는 끝내 회색 도시의 경계를 넘어 살아남았다.",
+    title: endingMap[type]?.title || "클리어",
+    summary: endingMap[type]?.summary || "오늘도 회색 도시를 버텨 냈다.",
     extraLines,
   };
 }
@@ -1387,6 +1564,10 @@ export default function SeoulRogueSelectionGame() {
 
   function emitItemGainNotices(items) {
     formatItemNotices(items).forEach((line) => pushFloating(`획득: ${line}`, "emerald"));
+  }
+
+  function emitItemUseNotice(itemName) {
+    pushFloating(`사용: ${itemName}`, "rose");
   }
 
   function recordChoice(eventTitle, label, dayValue) {
@@ -1460,18 +1641,34 @@ export default function SeoulRogueSelectionGame() {
       modHunger(next, 24);
       modMorale(next, 2, messages, "배를 채움");
       messages.unshift(`${meta.name} 사용`);
+      emitItemUseNotice(meta.name);
     } else if (meta.category === "water") {
       removeInventoryItems(next, "water", 1, itemId);
       modThirst(next, 28);
       messages.unshift(`${meta.name} 사용`);
+      if (itemId !== "bottled_water" && chance(0.3)) {
+        const statuses = ensureStatuses(next);
+        statuses.parasiteStacks = (statuses.parasiteStacks || 0) + 1;
+        messages.push("기생충 감염: 갈증 소모 속도가 증가한다.");
+      }
+      emitItemUseNotice(meta.name);
     } else if (meta.category === "meds") {
       removeInventoryItems(next, "meds", 1, itemId);
       heal(next, 14, messages, "치료");
+      removeStatus(next, "bleeding", null, messages);
+      if (itemId === "disinfectant" || itemId === "suture_kit") {
+        removeStatus(next, "infection", null, messages);
+      }
+      if (itemId === "suture_kit") {
+        removeStatus(next, "body_injury", null, messages);
+      }
       messages.unshift(`${meta.name} 사용`);
+      emitItemUseNotice(meta.name);
     } else if (meta.id === "route_map") {
       next.flags.routeMapReady = true;
       messages.unshift("노선 지도 확인");
       messages.push("노선 지도를 펼쳤다. 다음 상황에서 다른 경로를 고를 수 있다.");
+      emitItemUseNotice(meta.name);
     } else {
       return;
     }
@@ -1522,7 +1719,7 @@ export default function SeoulRogueSelectionGame() {
 
   function resolveChoice(choice) {
     if (!run || !event) return;
-    if (choice.disabled?.(run)) return;
+    if (getChoiceUnavailableReason(choice, run)) return;
 
     const next = copy(run);
     const beforeResources = {
@@ -1536,7 +1733,9 @@ export default function SeoulRogueSelectionGame() {
     const perkOfferRef = { current: null };
 
     recordChoice(event.title, choice.label, run.day);
+    const beforeDistance = next.distance;
     choice.effect(next, messages, perkOfferRef);
+    applyDistanceStatusProgress(next, Math.max(0, next.distance - beforeDistance), messages);
     const inventoryNotice = applyResourceDeltaToInventory(beforeResources, next);
 
     if (inventoryNotice.gained.length > 0) {
@@ -1601,6 +1800,9 @@ export default function SeoulRogueSelectionGame() {
     }
 
     if (action === "shoot") {
+      if (hasStatus(nextRun, "injury", "arm") || hasStatus(nextRun, "fracture", "arm")) {
+        messages.push("팔 부상 때문에 총을 제대로 다룰 수 없다.");
+      } else {
       const shootOption = getAvailableShootOption(nextRun);
       if (!shootOption) {
         messages.push("사용 가능한 총기와 해당 탄약이 없어 제대로 쏘지 못했다.");
@@ -1611,6 +1813,7 @@ export default function SeoulRogueSelectionGame() {
         enemy.hp -= damage;
         messages.push(`${shootOption.label} 사격으로 ${damage} 피해`);
       }
+      }
     }
 
     let guarding = false;
@@ -1620,6 +1823,9 @@ export default function SeoulRogueSelectionGame() {
     }
 
     if (action === "escape") {
+      if (hasStatus(nextRun, "injury", "leg") || hasStatus(nextRun, "fracture", "leg")) {
+        messages.push("다리 부상 때문에 도주할 수 없다.");
+      } else {
       const rate = 0.35 + (hasPerk(nextRun, "runner") ? 0.25 : 0) + (nextRun.morale >= 65 ? 0.1 : 0);
       if (Math.random() < rate) {
         nextRun.distance += 3;
@@ -1627,6 +1833,7 @@ export default function SeoulRogueSelectionGame() {
         messages.push("간신히 시야를 끊고 달아났다.");
         gainExp(nextRun, 4, messages, perkOfferRef);
         endTurn(nextRun, messages, perkOfferRef);
+        applyDistanceStatusProgress(nextRun, 3, messages);
 
         const inventoryNotice = applyResourceDeltaToInventory(beforeResources, nextRun);
         if (inventoryNotice.gained.length > 0) {
@@ -1647,6 +1854,7 @@ export default function SeoulRogueSelectionGame() {
         return;
       }
       messages.push("도주에 실패했다.");
+      }
     }
 
     if (enemy.hp > 0) {
@@ -1661,9 +1869,11 @@ export default function SeoulRogueSelectionGame() {
       nextRun.flags.battleWins += 1;
       gainExp(nextRun, enemy.exp, messages, perkOfferRef);
       if (typeof enemy.loot === "function") enemy.loot(nextRun, messages);
-      nextRun.distance += rand(3, 6);
+      const moveGain = rand(3, 6);
+      nextRun.distance += moveGain;
       modMorale(nextRun, 3, messages, "전투 승리");
       endTurn(nextRun, messages, perkOfferRef);
+      applyDistanceStatusProgress(nextRun, moveGain, messages);
 
       const inventoryNotice = applyResourceDeltaToInventory(beforeResources, nextRun);
       if (inventoryNotice.gained.length > 0) {
@@ -1711,15 +1921,15 @@ export default function SeoulRogueSelectionGame() {
       next.hp = Math.min(next.maxHp, next.hp + 12);
     }
     setRun(next);
-    appendHistory([`새 특성 획득: ${perk.name}`, perk.desc], "perk", next.day);
-    pushFloating(`특성 획득: ${perk.name}`, "violet");
+    const level = getPerkLevel(next, perk.id);
+    appendHistory([`새 특성 획득: ${perk.name}${level > 1 ? ` Lv. ${level}` : ""}`, perk.desc], "perk", next.day);
+    pushFloating(`특성 획득: ${perk.name}${level > 1 ? ` Lv. ${level}` : ""}`, "violet");
     setPerkOffer(null);
     setPerkOverlayHidden(false);
   }
 
-  const topPerks = run?.perks
-    ?.map((id) => PERKS.find((p) => p.id === id))
-    .filter(Boolean) || [];
+  const topPerks = run ? PERKS.filter((perk, index, array) => array.findIndex((entry) => entry.id === perk.id) === index)
+    .filter((perk) => getPerkLevel(run, perk.id) > 0) : [];
 
   const expRate = run ? clamp((run.exp / run.nextLevelExp) * 100, 0, 100) : 0;
   const itemDialogMeta = itemDialog ? getItemMeta(itemDialog.itemId) : null;
@@ -1872,12 +2082,19 @@ export default function SeoulRogueSelectionGame() {
                   </div>
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {topPerks.length > 0 ? topPerks.map((perk) => (
-                    <div key={perk.id} className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-200">
-                      {perk.name}
-                    </div>
-                  )) : (
+                <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  {topPerks.length > 0 ? topPerks.map((perk) => {
+                    const level = getPerkLevel(run, perk.id);
+                    return (
+                      <div key={perk.id} className="rounded-3xl border border-white/10 bg-black/20 px-3 py-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-semibold text-white">{perk.name}</div>
+                          <div className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-zinc-300">{level > 1 ? `Lv. ${level}` : "보유"}</div>
+                        </div>
+                        <div className="mt-1 text-xs leading-5 text-zinc-400">{perk.desc}</div>
+                      </div>
+                    );
+                  }) : (
                     <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-xs text-zinc-400">특성 없음</div>
                   )}
                 </div>
@@ -1896,7 +2113,7 @@ export default function SeoulRogueSelectionGame() {
                     <p className="mt-3 text-sm leading-7 text-zinc-300">{event.text}</p>
                     <div className="mt-5 space-y-3">
                       {event.choices.map((choice, idx) => {
-                        const disabledReason = getChoiceDisabledReason(choice, run);
+                        const disabledReason = getChoiceUnavailableReason(choice, run);
                         const disabled = Boolean(disabledReason);
                         return (
                           <button
@@ -1945,6 +2162,13 @@ export default function SeoulRogueSelectionGame() {
                     >
                       아이템 칸
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("status")}
+                      className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${activeTab === "status" ? "bg-white text-black" : "text-zinc-300 hover:bg-white/10"}`}
+                    >
+                      상태
+                    </button>
                   </div>
                   <div className="text-xs text-zinc-500">최근 {visibleChoiceHistory.length}개</div>
                 </div>
@@ -1973,6 +2197,38 @@ export default function SeoulRogueSelectionGame() {
                         </button>
                       );
                     })}
+                  </div>
+                ) : activeTab === "status" ? (
+                  <div className="space-y-4">
+                    <div className="rounded-3xl border border-white/10 bg-black/20 p-4">
+                      <div className="grid grid-cols-3 gap-3 text-center">
+                        <div className="col-start-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
+                          <div className="text-xs text-zinc-500">머리</div>
+                          <div className="mt-2 text-xs text-zinc-200">{(run.statuses?.head || []).length > 0 ? getStatusLabels(run.statuses.head).join(", ") : "이상 없음"}</div>
+                        </div>
+                        <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
+                          <div className="text-xs text-zinc-500">왼팔/오른팔</div>
+                          <div className="mt-2 text-xs text-zinc-200">{(run.statuses?.arm || []).length > 0 ? getStatusLabels(run.statuses.arm).join(", ") : "이상 없음"}</div>
+                        </div>
+                        <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
+                          <div className="text-xs text-zinc-500">몸</div>
+                          <div className="mt-2 text-xs text-zinc-200">{(run.statuses?.body || []).length > 0 ? getStatusLabels(run.statuses.body).join(", ") : "이상 없음"}</div>
+                        </div>
+                        <div className="col-start-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
+                          <div className="text-xs text-zinc-500">다리</div>
+                          <div className="mt-2 text-xs text-zinc-200">{(run.statuses?.leg || []).length > 0 ? getStatusLabels(run.statuses.leg).join(", ") : "이상 없음"}</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="rounded-3xl border border-white/10 bg-black/20 p-4 text-xs leading-6 text-zinc-300">
+                      <div>머리 부상: 관찰 계열 선택 불가</div>
+                      <div>팔 부상: 총 사용·손을 쓰는 행동 불가</div>
+                      <div>다리 부상: 달리기·뛰어넘기 불가, 경험치 획득 50% 감소</div>
+                      <div>몸 부상: 20거리 이내 치료하지 못하면 사망</div>
+                      <div>출혈: 10거리 이내 제거하지 못하면 감염으로 악화</div>
+                      <div>감염: 이동할 때마다 모든 능력치 1% 감소</div>
+                      <div>기생충: 중첩될수록 갈증 소모 속도 증가</div>
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -2047,7 +2303,7 @@ export default function SeoulRogueSelectionGame() {
                 type="button"
                 onClick={closeItemCategoryDialog}
                 aria-label="닫기"
-                className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-lg text-zinc-300 transition hover:bg-white/10"
+                className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-lg leading-none text-zinc-300 transition hover:bg-white/10"
               >
                 ×
               </button>
@@ -2119,19 +2375,18 @@ export default function SeoulRogueSelectionGame() {
                         <div className="mt-5 grid grid-cols-2 gap-3">
               <button
                 type="button"
-                onClick={closeItemDialog}
-                aria-label="닫기"
-                className="flex items-center justify-center rounded-3xl border border-white/10 bg-white/5 px-4 py-3 text-2xl font-semibold text-zinc-200 transition hover:bg-white/10"
-              >
-                ×
-              </button>
-              <button
-                type="button"
                 onClick={confirmUseItem}
                 disabled={!(["food", "water", "meds"].includes(itemDialog.category) || itemDialog.itemId === "route_map")}
                 className="rounded-3xl bg-white px-4 py-3 font-semibold text-black transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-35"
               >
                 사용
+              </button>
+              <button
+                type="button"
+                onClick={closeItemDialog}
+                className="flex items-center justify-center rounded-3xl border border-white/10 bg-white/5 px-4 py-3 font-semibold text-zinc-200 transition hover:bg-white/10"
+              >
+                취소
               </button>
             </div>
           </div>
@@ -2139,7 +2394,7 @@ export default function SeoulRogueSelectionGame() {
       )}
 
       {floatingNotices.length > 0 && (
-        <div className="pointer-events-none fixed left-1/2 top-4 z-50 flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 flex-col gap-2">
+        <div className="pointer-events-none fixed left-1/2 top-1/2 z-50 flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 flex-col gap-2">
           {floatingNotices.map((notice) => (
             <div
               key={notice.id}
@@ -2148,7 +2403,9 @@ export default function SeoulRogueSelectionGame() {
                   ? "border-emerald-400/30 bg-emerald-500/15 text-emerald-50"
                   : notice.tone === "violet"
                     ? "border-violet-400/30 bg-violet-500/15 text-violet-50"
-                    : "border-white/10 bg-black/55 text-zinc-100"
+                    : notice.tone === "rose"
+                      ? "border-rose-400/30 bg-rose-500/15 text-rose-50"
+                      : "border-white/10 bg-black/55 text-zinc-100"
               }`}
             >
               {notice.text}
@@ -2183,7 +2440,10 @@ export default function SeoulRogueSelectionGame() {
                   onClick={() => selectPerk(perk)}
                   className="w-full rounded-3xl border border-white/10 bg-white/5 p-4 text-left transition hover:bg-white/10"
                 >
-                  <div className="font-semibold text-white">{perk.name}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-semibold text-white">{perk.name}</div>
+                    <div className="text-[11px] text-zinc-500">{getPerkLevel(run, perk.id) > 0 ? `현재 Lv. ${getPerkLevel(run, perk.id)}` : "신규"}</div>
+                  </div>
                   <div className="mt-2 text-[11px] text-zinc-500">능력</div>
                   <div className="mt-1 text-sm leading-6 text-zinc-300">{perk.desc}</div>
                 </button>
